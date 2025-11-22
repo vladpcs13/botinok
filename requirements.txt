@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 telebot
 yt_dlp
+gunicorn
