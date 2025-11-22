@@ -1,100 +1,141 @@
 import telebot
 from telebot import types
-import google.generativeai as genai
-from flask import Flask, request
+import yt_dlp
+import os
+import time
+from telebot.apihelper import ApiTelegramException
 
-TOKEN = "8386093867:AAFy_CAN7KeAUMqt04Ovbrxv82jeRh3UzN0"
-GEMINI_KEY = "AIzaSyCYmmY1beGXe6aAT5lG36nNwATz2ZEp8jA"
-ADMIN_ID = 7532828180
+TOKEN = "8539534520:AAEnYk4rwEv-5_ZJCb44FIR6Hdz0317ApKc"
 
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
-
-# Настройка Gemini
-genai.configure(api_key=GEMINI_KEY)
-
-# Храним историю чатов
-history = {}
-# Храним системный промпт
-system_prompt = "Ты — дружелюбный AI-ассистент."
 
 
-def get_gemini_response(user_id, message):
-    """Отправка запроса к Gemini с историей сообщений"""
-    if user_id not in history:
-        history[user_id] = []
+def safe_send(method, *args, **kwargs):
+    while True:
+        try:
+            return method(*args, **kwargs)
+        except ApiTelegramException as e:
+            if e.error_code == 429:
+                wait = int(e.result_json["parameters"]["retry_after"])
+                print(f"⚠ Rate limit: жду {wait} сек…")
+                time.sleep(wait)
+            else:
+                raise
 
-    # Добавляем сообщение пользователя в историю
-    history[user_id].append({"role": "user", "content": message})
 
-    # Подготавливаем контекст
-    messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history[user_id])
+def progress_hook(d, chat_id, msg_id):
+    if d['status'] == 'downloading':
+        percent = d.get("_percent_str", "").replace("\x1b[0;94m", "").replace("\x1b[0m", "").strip()
+        try:
+            safe_send(
+                bot.edit_message_text,
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=f"⏳ Загружаю: {percent}"
+            )
+        except:
+            pass
 
-    model = genai.GenerativeModel("gemini-pro")
-    response = model.generate_content(
-        messages,
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.8,
-            max_output_tokens=500
-        )
-    )
 
-    # Ответ Gemini
-    reply_text = response.text
 
-    # Сохраняем в историю
-    history[user_id].append({"role": "assistant", "content": reply_text})
+def download(url, quality, chat_id, msg_id):
+    ydl_opts = {
+        "outtmpl": "download.%(ext)s",
+        "progress_hooks": [lambda d: progress_hook(d, chat_id, msg_id)]
+    }
 
-    return reply_text
+    if quality == "audio":
+        ydl_opts["format"] = "bestaudio/best"
+    else:
+        ydl_opts["format"] = f"bestvideo[height={quality}]+bestaudio/best/best"
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        return filename
+
 
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "Привет! Я бот с интеллектом Gemini. Задавай вопросы!")
+    safe_send(bot.send_message, message.chat.id, "Тебя тоже достало что нигде не можешь скачать видео или музыку? Выход есть, кидай сюда ссылку. Создатель @BannedThirdTimes")
 
 
-@bot.message_handler(commands=['setprompt'])
-def set_prompt(message):
-    """Установка системного промпта (только для админа)"""
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "У вас нет доступа.")
-        return
 
-    prompt = message.text.replace("/setprompt", "").strip()
-
-    if not prompt:
-        bot.reply_to(message, "Напиши так: /setprompt <текст>")
-        return
-
-    global system_prompt
-    system_prompt = prompt
-
-    bot.reply_to(message, f"Промпт обновлён:\n\n{prompt}")
+@bot.message_handler(func=lambda m: m.text.startswith(("http://", "https://")))
+def ask_quality(message):
+    url = message.text.strip()
 
 
-@bot.message_handler(func=lambda m: True)
-def conversation(message):
-    """Обычный диалог"""
-    user_id = message.from_user.id
-    reply = get_gemini_response(user_id, message.text)
-    bot.send_message(message.chat.id, reply)
+    ydl_opts = {"quiet": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    kb = types.InlineKeyboardMarkup()
+    added = set()
 
 
-# --- Webhook routes for Render.com ---
-
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    json_str = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "OK", 200
+    for f in info["formats"]:
+        h = f.get("height")
+        if h and h not in added:
+            kb.add(types.InlineKeyboardButton(f"{h}p", callback_data=f"q{h}|{url}"))
+            added.add(h)
 
 
-@app.route("/")
-def home():
-    return "Bot is running!", 200
+    kb.add(types.InlineKeyboardButton("Аудио", callback_data=f"qaudio|{url}"))
+
+    safe_send(bot.send_message, message.chat.id, "выбери:", reply_markup=kb)
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("q"))
+def process_callback(call):
+    safe_send(bot.answer_callback_query, call.id)
+
+    data, url = call.data[1:].split("|")
+
+    if data == "audio":
+        quality = "audio"
+        display = "Аудио"
+    else:
+        quality = data
+        display = f"{quality}p"
+
+    msg = safe_send(bot.send_message, call.message.chat.id, f"⏳ Загрузка ({display})…")
+    chat_id = call.message.chat.id
+    msg_id = msg.message_id
+
+    try:
+        filename = download(url, quality, chat_id, msg_id)
+
+
+        ext = filename.split(".")[-1]
+
+        if quality == "audio":
+            new_name = f"@Reuploader13Bot.{ext}"
+        else:
+            new_name = f"@Reuploader13Bot.{ext}"
+
+
+        if os.path.exists(new_name):
+            os.remove(new_name)
+
+        os.rename(filename, new_name)
+
+        safe_send(bot.edit_message_text, "Отправляю…", chat_id, msg_id)
+
+
+        with open(new_name, "rb") as f:
+            if quality == "audio":
+                safe_send(bot.send_audio, chat_id, f)
+            else:
+                safe_send(bot.send_video, chat_id, f)
+
+        os.remove(new_name)
+
+    except Exception as e:
+        safe_send(bot.send_message, chat_id, f"❌ Ошибка:\n{e}")
+
+
+print("Created by @BannedThirdTimes")
+bot.infinity_polling()
