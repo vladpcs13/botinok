@@ -3,10 +3,11 @@ from telebot import types
 import yt_dlp
 import os
 import time
+from flask import Flask
 from telebot.apihelper import ApiTelegramException
 
-TOKEN = "8539534520:AAEnYk4rwEv-5_ZJCb44FIR6Hdz0317ApKc"
 
+TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
 
@@ -17,7 +18,7 @@ def safe_send(method, *args, **kwargs):
         except ApiTelegramException as e:
             if e.error_code == 429:
                 wait = int(e.result_json["parameters"]["retry_after"])
-                print(f"⚠ Rate limit: жду {wait} сек…")
+                print(f"⚠ Rate limit: wait {wait} sec…")
                 time.sleep(wait)
             else:
                 raise
@@ -58,14 +59,13 @@ def download(url, quality, chat_id, msg_id):
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    safe_send(bot.send_message, message.chat.id, "Тебя тоже достало что нигде не можешь скачать видео или музыку? Выход есть, кидай сюда ссылку. Создатель @BannedThirdTimes")
+    safe_send(bot.send_message, message.chat.id, "Тебя тоже достало что нигде не можешь скачать видео или музыку? Кидай ссылку. Создатель @BannedThirdTimes")
 
 
 
 @bot.message_handler(func=lambda m: m.text.startswith(("http://", "https://")))
 def ask_quality(message):
     url = message.text.strip()
-
 
     ydl_opts = {"quiet": True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -74,13 +74,11 @@ def ask_quality(message):
     kb = types.InlineKeyboardMarkup()
     added = set()
 
-
     for f in info["formats"]:
         h = f.get("height")
         if h and h not in added:
             kb.add(types.InlineKeyboardButton(f"{h}p", callback_data=f"q{h}|{url}"))
             added.add(h)
-
 
     kb.add(types.InlineKeyboardButton("Аудио", callback_data=f"qaudio|{url}"))
 
@@ -108,14 +106,8 @@ def process_callback(call):
     try:
         filename = download(url, quality, chat_id, msg_id)
 
-
         ext = filename.split(".")[-1]
-
-        if quality == "audio":
-            new_name = f"@Reuploader13Bot.{ext}"
-        else:
-            new_name = f"@Reuploader13Bot.{ext}"
-
+        new_name = f"@Reuploader13Bot.{ext}"
 
         if os.path.exists(new_name):
             os.remove(new_name)
@@ -123,7 +115,6 @@ def process_callback(call):
         os.rename(filename, new_name)
 
         safe_send(bot.edit_message_text, "Отправляю…", chat_id, msg_id)
-
 
         with open(new_name, "rb") as f:
             if quality == "audio":
@@ -138,4 +129,22 @@ def process_callback(call):
 
 
 print("Created by @BannedThirdTimes")
-bot.infinity_polling()
+
+
+# ----------------------------
+# RUN ON RENDER
+# ----------------------------
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running"
+
+
+import threading
+threading.Thread(target=lambda: bot.infinity_polling(skip_pending=True)).start()
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
